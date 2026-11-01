@@ -46,12 +46,12 @@ describe.runIf(TEST_DB)("household onboarding", () => {
     const { token } = await createInvite(db, a);
     expect(await findInvite(db, token)).not.toBeNull();
     await expect(acceptInvite(db, token, { name: "luke", pin: "31415926" })).rejects.toThrow(/already in this household/);
-    const p = await acceptInvite(db, token, { name: "Sam", pin: "31415926" });
+    const p = await acceptInvite(db, token, { name: "Julia", pin: "31415926" });
     b = { userId: p.id, householdId: a.householdId };
     expect(await findInvite(db, token)).toBeNull(); // single use
     await expect(createInvite(db, a)).rejects.toThrow(/two people/);
     expect(await db.category.count({ where: { householdId: a.householdId } })).toBeGreaterThan(25);
-    expect((await loginPeople(db)).map((x) => x.name)).toEqual(["Luke", "Sam"]);
+    expect((await loginPeople(db)).map((x) => x.name)).toEqual(["Luke", "Julia"]);
   });
 
   it("PIN sign-in locks after 5 wrong tries, survives the right PIN while locked, then resets", async () => {
@@ -61,7 +61,7 @@ describe.runIf(TEST_DB)("household onboarding", () => {
     await expect(loginWithPin(db, a.userId, "27183141")).rejects.toThrow(/Try again in/); // right PIN still refused while locked
     await db.user.update({ where: { id: a.userId }, data: { lockedUntil: new Date(Date.now() - 1000) } });
     expect((await loginWithPin(db, a.userId, "27183141")).id).toBe(a.userId);
-    // Sam's PIN doesn't open Luke's account
+    // Julia's PIN doesn't open Luke's account
     await expect(loginWithPin(db, a.userId, "31415926")).rejects.toThrow(/isn't right/);
     await changePin(db, a, "27183141", "16180339");
     expect((await loginWithPin(db, a.userId, "16180339")).id).toBe(a.userId);
