@@ -1,0 +1,567 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Tandem — data model
+//
+// Conventions
+//  • Money is stored as integer minor units (pence/cent) in `Int`. Never floats.
+//    Int is 32-bit in Prisma → ±£21.4m per value, ample for household finance.
+//    Postgres migration path: switch to BigInt if that ever stops being true.
+//  • Sign convention: negative = money out (debit), positive = money in (credit).
+//  • Dates that are "calendar days" (posting date, budget month) are stored as
+//    DateTime at 00:00 UTC. UK statements carry no time-of-day; using UTC
+//    midnight avoids BST off-by-one bugs.
+//  • Enums are modelled as String + TS union: keeps the schema portable and
+//    migrations trivial. Validation lives in zod at the edge.
+//  • Every row that can be private carries enough information for the access
+//    layer (src/domain/access) to decide visibility WITHOUT extra joins.
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider      = "prisma-client-js"
+  // native = dev machine, rhel = Vercel, debian = the Docker image
+  binaryTargets = ["native", "rhel-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+// Postgres (Neon on Vercel). Neon's Vercel integration sets both variables:
+// DATABASE_URL is pooled (for the app), DATABASE_URL_UNPOOLED is direct (for migrations).
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+// ── Identity ────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  /// Optional — sign-in is name + PIN. Kept for a future recovery/magic-link flow.
+  email         String?   @unique
+  emailVerified DateTime?
+  name          String
+  displayColour String    @default("#6366F1") // used to tint "whose is this" chips
+  /// scrypt hash of the 8-digit PIN.
+  pinHash       String
+  /// Lockout: 5 wrong PINs → locked for 15 minutes. Stored in the DB because
+  /// serverless instances don't share memory.
+  failedLogins  Int       @default(0)
+  lockedUntil   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  membership HouseholdMember?
+  sessions   Session[]
+
+  ownedAccounts      Account[]          @relation("AccountOwner")
+  uploadedStatements Statement[]
+  reactions          TransactionReaction[]
+  notes              TransactionNote[]
+  activity           ActivityLog[]
+  goalContributions  GoalContribution[]
+  sentInvites        HouseholdInvite[]  @relation("InviteSender")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique // store a hash, never the raw session token
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  userAgent String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String // email
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  purpose    String // "magic_link" | "email_verify" | "password_reset"
+
+  @@unique([identifier, tokenHash])
+}
+
+// ── Household ───────────────────────────────────────────────────────────────
+// A household is the sharing boundary. v1 caps membership at 2 (enforced in
+// the domain layer, not the DB) but nothing here assumes exactly two.
+
+model Household {
+  id           String   @id @default(cuid())
+  name         String
+  currency     String   @default("GBP") // ISO 4217; base currency for rollups
+  monthStartDay Int     @default(1) // payday-aligned budgeting (e.g. 25th)
+  createdAt    DateTime @default(now())
+
+  members      HouseholdMember[]
+  invites      HouseholdInvite[]
+  accounts     Account[]
+  categories   Category[]
+  categoryGroups CategoryGroup[]
+  rules        CategorisationRule[]
+  merchants    Merchant[]
+  budgets      Budget[]
+  goals        Goal[]
+  activity     ActivityLog[]
+  statements   Statement[]
+}
+
+model HouseholdMember {
+  id          String   @id @default(cuid())
+  householdId String
+  userId      String   @unique // a user belongs to at most one household in v1
+  role        String   @default("member") // "owner" | "member"
+  joinedAt    DateTime @default(now())
+
+  // What this member allows their partner to see by default for NEW accounts.
+  // Existing accounts keep their explicit visibility.
+  defaultAccountVisibility String @default("shared") // AccountVisibility
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([householdId])
+}
+
+/// Invites are LINKS the owner sends however they like (WhatsApp, text). No email
+/// infrastructure needed for a two-person app; `email` is optional and only
+/// used to pre-fill the sign-up form.
+model HouseholdInvite {
+  id          String    @id @default(cuid())
+  householdId String
+  email       String?
+  tokenHash   String    @unique
+  invitedById String
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  invitedBy User      @relation("InviteSender", fields: [invitedById], references: [id])
+
+  @@index([householdId])
+}
+
+// ── Accounts ────────────────────────────────────────────────────────────────
+
+model Account {
+  id          String  @id @default(cuid())
+  householdId String
+  // null ownerId ⇔ joint account (owned by the household). Joint accounts are
+  // always visible to both members; visibility only applies to personal ones.
+  ownerId     String?
+  name        String // "Monzo Current", "Amex Gold"
+  type        String // AccountType: current | savings | credit_card | loan | cash | investment | mortgage
+  institution String? // BankId, e.g. "monzo", "barclays" — matches parser profiles
+  currency    String  @default("GBP")
+  // Last 4 of account / card number only. We never store full account numbers.
+  maskedNumber String?
+
+  /// AccountVisibility:
+  ///  "shared"       partner sees everything
+  ///  "summary_only" partner sees balance + category totals, not transactions
+  ///  "private"      partner does not know it exists (excluded from household rollups
+  ///                 the partner can see; owner still sees it in their own view)
+  visibility String @default("shared")
+
+  // Excludes transfers-in/out of this account from spending (e.g. savings pots).
+  isSavingsLike Boolean  @default(false)
+  archivedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  household    Household     @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  owner        User?         @relation("AccountOwner", fields: [ownerId], references: [id])
+  transactions Transaction[]
+  statements   Statement[]
+  balances     BalanceSnapshot[]
+
+  @@index([householdId])
+  @@index([ownerId])
+}
+
+/// Point-in-time balances, harvested from statements (opening/closing/running)
+/// or entered manually. Net worth = latest snapshot per account.
+model BalanceSnapshot {
+  id        String   @id @default(cuid())
+  accountId String
+  date      DateTime
+  balance   Int // minor units
+  source    String // "statement_closing" | "statement_running" | "manual"
+  statementId String?
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, date, source])
+  @@index([accountId, date])
+}
+
+// ── Statement ingestion ─────────────────────────────────────────────────────
+// Lifecycle: uploaded → parsed (staged rows in StatementRow) → reviewed →
+// committed (rows become Transactions) | discarded.
+// Staging lets the user fix parse errors before anything touches their ledger.
+
+model Statement {
+  id          String   @id @default(cuid())
+  householdId String
+  accountId   String?  // can be null until the user confirms which account
+  uploadedById String
+
+  originalFilename String
+  mimeType         String
+  sizeBytes        Int
+  sha256           String // of plaintext; detects re-upload of the identical file
+  // Encrypted blob path (AES-256-GCM, see src/lib/crypto). Null if the user
+  // opted not to retain originals.
+  storageKey       String?
+  encryptionIv     String?
+  encryptionTag    String?
+
+  format     String // "csv" | "ofx" | "qfx" | "pdf"
+  bankId     String? // detected profile, e.g. "monzo"
+  parserId   String? // exact parser + version, e.g. "csv:monzo@1"
+  status     String  @default("uploaded") // uploaded | parsed | needs_review | committed | failed | discarded
+  blob       StatementBlob?
+  confidence Float? // 0..1 aggregate parse confidence
+  errorCode  String?
+
+  periodStart    DateTime?
+  periodEnd      DateTime?
+  openingBalance Int?
+  closingBalance Int?
+  // Did sum(rows) reconcile opening→closing? Strongest single signal of a clean parse.
+  reconciled     Boolean?
+
+  createdAt   DateTime  @default(now())
+  committedAt DateTime?
+
+  household  Household      @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  account    Account?       @relation(fields: [accountId], references: [id])
+  uploadedBy User           @relation(fields: [uploadedById], references: [id])
+  rows       StatementRow[]
+  transactions Transaction[]
+
+  @@index([householdId, status])
+  @@index([accountId])
+  @@index([sha256])
+}
+
+/// Encrypted original statement file (AES-256-GCM ciphertext only). Lives in
+/// Postgres so there's no separate blob service to set up; statements are
+/// small (typically 20–500 KB). Statement.storageKey points here.
+model StatementBlob {
+  id          String   @id @default(cuid())
+  statementId String   @unique
+  ciphertext  Bytes
+  createdAt   DateTime @default(now())
+
+  statement Statement @relation(fields: [statementId], references: [id], onDelete: Cascade)
+}
+
+/// A parsed-but-not-yet-committed line. Kept after commit for provenance.
+model StatementRow {
+  id          String  @id @default(cuid())
+  statementId String
+  rowIndex    Int
+  date        DateTime
+  amount      Int
+  description String
+  rawDescription String // pre-normalisation, exactly as on statement
+  runningBalance Int?
+  externalId  String? // FITID (OFX) or bank transaction id (Monzo/Starling CSV)
+  confidence  Float
+  warnings    String  @default("[]") // JSON string[] of ParseWarning codes
+
+  /// "new" | "duplicate" (already in ledger) | "user_excluded" | "committed"
+  disposition String  @default("new")
+  duplicateOfId String?
+
+  statement Statement @relation(fields: [statementId], references: [id], onDelete: Cascade)
+
+  @@unique([statementId, rowIndex])
+}
+
+// ── Ledger ──────────────────────────────────────────────────────────────────
+
+model Transaction {
+  id          String   @id @default(cuid())
+  accountId   String
+  date        DateTime
+  amount      Int // minor units, signed
+  currency    String   @default("GBP")
+  description String   // cleaned
+  rawDescription String
+  merchantId  String?
+  categoryId  String?
+
+  /// How the category got set — drives UI ("auto" chips) and learning weight.
+  /// "rule" | "learned" | "seed" | "user" | "split_parent" | null
+  categorySource String?
+  categoryConfidence Float?
+
+  // Private transaction inside a shared/joint account. Partner sees nothing, and
+  // the amount is excluded from any total the partner can see. `privateOwnerId`
+  // records WHO hid it — needed for joint accounts, where either member may hide
+  // a transaction (the classic case: a surprise gift). See src/domain/access.
+  isPrivate      Boolean @default(false)
+  privateOwnerId String?
+  // Internal transfer between household accounts → excluded from spend/income.
+  transferGroupId String?
+  isRecurring Boolean  @default(false)
+  recurringSeriesId String?
+
+  // Splits: parent keeps original amount; children carry category allocations.
+  // Totals query children where present, else the parent. Children sum to parent.
+  parentId    String?
+
+  // Dedupe fingerprint: hash(accountId, date, amount, normalisedDescription, occurrence).
+  // `occurrence` disambiguates genuine identical same-day transactions (2 coffees).
+  fingerprint String
+  externalId  String?
+
+  source      String  @default("statement") // "statement" | "manual" | "open_banking"
+  statementId String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  account   Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  merchant  Merchant? @relation(fields: [merchantId], references: [id])
+  category  Category? @relation(fields: [categoryId], references: [id])
+  statement Statement? @relation(fields: [statementId], references: [id])
+  parent    Transaction?  @relation("Split", fields: [parentId], references: [id], onDelete: Cascade)
+  splits    Transaction[] @relation("Split")
+  notes     TransactionNote[]
+  reactions TransactionReaction[]
+  recurringSeries RecurringSeries? @relation(fields: [recurringSeriesId], references: [id])
+  goalContribution GoalContribution?
+
+  @@unique([accountId, fingerprint])
+  @@index([accountId, date])
+  @@index([categoryId, date])
+  @@index([merchantId])
+  @@index([externalId])
+}
+
+model TransactionNote {
+  id            String   @id @default(cuid())
+  transactionId String
+  authorId      String
+  body          String
+  // Notes default to visible to partner (if the txn is visible). Owner can keep one to themselves.
+  isPrivate     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  author      User        @relation(fields: [authorId], references: [id])
+}
+
+model TransactionReaction {
+  id            String   @id @default(cuid())
+  transactionId String
+  userId        String
+  emoji         String
+  createdAt     DateTime @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id])
+
+  @@unique([transactionId, userId, emoji])
+}
+
+model RecurringSeries {
+  id           String   @id @default(cuid())
+  merchantId   String?
+  cadence      String // "weekly" | "fortnightly" | "four_weekly" | "monthly" | "quarterly" | "annual"
+  typicalAmount Int
+  amountVariance Float // coefficient of variation; ~0 for fixed DDs, higher for utilities
+  nextExpected DateTime?
+  confirmedByUser Boolean @default(false)
+  dismissedAt  DateTime?
+
+  merchant     Merchant?     @relation(fields: [merchantId], references: [id])
+  transactions Transaction[]
+}
+
+// ── Categorisation ──────────────────────────────────────────────────────────
+
+model CategoryGroup {
+  id          String @id @default(cuid())
+  householdId String
+  name        String // "Bills", "Needs", "Wants", "Savings", "Income", "Transfers"
+  kind        String // "expense" | "income" | "transfer" — controls cash-flow maths
+  sortOrder   Int    @default(0)
+
+  household  Household  @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  categories Category[]
+
+  @@unique([householdId, name])
+}
+
+model Category {
+  id          String  @id @default(cuid())
+  householdId String
+  groupId     String
+  // Stable key for seeded categories ("groceries") so seed rules can target
+  // them even after the user renames the category.
+  key         String?
+  name        String
+  emoji       String?
+  colour      String?
+  archivedAt  DateTime?
+  sortOrder   Int     @default(0)
+
+  household    Household     @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  group        CategoryGroup @relation(fields: [groupId], references: [id])
+  transactions Transaction[]
+  rules        CategorisationRule[]
+  budgetLines  BudgetLine[]
+  merchants    Merchant[]
+
+  @@unique([householdId, key])
+  @@index([householdId])
+}
+
+/// Canonical merchant ("TESCO STORES 3021 BELFAST" → Tesco).
+/// `defaultCategoryId` is the learned mapping updated by user corrections.
+model Merchant {
+  id          String  @id @default(cuid())
+  householdId String
+  name        String // display name
+  normalisedKey String // output of normaliseMerchant(), e.g. "tesco"
+  defaultCategoryId String?
+  // Learning counters: how many times users confirmed / overrode the default.
+  confirmations Int @default(0)
+  overrides     Int @default(0)
+
+  household       Household  @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  defaultCategory Category?  @relation(fields: [defaultCategoryId], references: [id])
+  transactions    Transaction[]
+  recurringSeries RecurringSeries[]
+
+  @@unique([householdId, normalisedKey])
+}
+
+/// Explicit rules, evaluated in priority order before learned merchant defaults.
+/// Seed rules are copied per household (origin="seed") so users can edit/delete them.
+model CategorisationRule {
+  id          String  @id @default(cuid())
+  householdId String
+  categoryId  String
+  priority    Int     @default(100) // lower runs first; user rules default to 10
+  origin      String  @default("user") // "user" | "seed" | "learned"
+
+  // Match conditions — all non-null conditions must match (AND).
+  descriptionContains String?
+  descriptionRegex    String?
+  merchantKey         String?
+  amountMin           Int?
+  amountMax           Int?
+  direction           String? // "in" | "out"
+  accountId           String?
+
+  // Optional side effects
+  markPrivate Boolean @default(false)
+  renameTo    String?
+
+  hitCount  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  category  Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@index([householdId, priority])
+}
+
+// ── Budgets ─────────────────────────────────────────────────────────────────
+
+/// One Budget per (household, scope, owner, month). Scope "household" budgets
+/// count spending from all shared-visible accounts; "personal" budgets count
+/// only the owner's personal accounts + their share of joint (configurable).
+model Budget {
+  id          String   @id @default(cuid())
+  householdId String
+  scope       String   // "household" | "personal"
+  ownerId     String?  // set when scope = personal
+  month       DateTime // first day of the budget period (respects monthStartDay)
+  style       String   @default("targets") // "targets" | "zero_based"
+  // Zero-based: income expected this period that must be fully allocated.
+  plannedIncome Int?
+
+  household Household    @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  lines     BudgetLine[]
+
+  @@unique([householdId, scope, ownerId, month])
+}
+
+model BudgetLine {
+  id         String  @id @default(cuid())
+  budgetId   String
+  categoryId String
+  amount     Int // allocated for this period, positive minor units
+  // "none": unspent disappears. "positive": carry unspent forward.
+  // "both": carry overspend forward too (envelope-style).
+  rollover   String  @default("none")
+  // Snapshot of the carry-in computed when the period was opened. Persisted so
+  // editing last month's transactions doesn't silently rewrite this month.
+  carriedIn  Int     @default(0)
+
+  budget   Budget   @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id])
+
+  @@unique([budgetId, categoryId])
+}
+
+// ── Goals ───────────────────────────────────────────────────────────────────
+
+model Goal {
+  id          String    @id @default(cuid())
+  householdId String
+  ownerId     String?   // null ⇒ shared goal
+  name        String
+  emoji       String?
+  targetAmount Int
+  targetDate  DateTime?
+  // Optional: a savings account whose balance IS the goal progress.
+  linkedAccountId String?
+  isPrivate   Boolean   @default(false) // personal goals can be hidden
+  achievedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  household     Household          @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  contributions GoalContribution[]
+}
+
+model GoalContribution {
+  id            String   @id @default(cuid())
+  goalId        String
+  userId        String
+  amount        Int
+  date          DateTime
+  transactionId String?  @unique // optional link to the real transfer
+
+  goal        Goal         @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id])
+  transaction Transaction? @relation(fields: [transactionId], references: [id])
+}
+
+// ── Audit ───────────────────────────────────────────────────────────────────
+
+/// Who changed what. `summary` is human-readable and MUST NOT contain amounts
+/// or descriptions of private items — the partner can read this log.
+model ActivityLog {
+  id          String   @id @default(cuid())
+  householdId String
+  actorId     String
+  action      String   // "statement.committed" | "transaction.recategorised" | ...
+  entityType  String
+  entityId    String
+  summary     String
+  // Visibility mirrors the entity: private entities produce owner-only entries.
+  visibleToPartner Boolean @default(true)
+  createdAt   DateTime @default(now())
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  actor     User      @relation(fields: [actorId], references: [id])
+
+  @@index([householdId, createdAt])
+}

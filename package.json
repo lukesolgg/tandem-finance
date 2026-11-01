@@ -1,0 +1,50 @@
+{
+  "name": "tandem",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Couple-first personal finance. Statement upload \u2192 clean transactions \u2192 shared, private-by-choice budgeting.",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "e2e": "node scripts/e2e-smoke.mjs",
+    "parse": "tsx scripts/parse-file.ts",
+    "postinstall": "prisma generate",
+    "vercel-build": "prisma generate && prisma migrate deploy && next build"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.0.0",
+    "@tailwindcss/postcss": "^4.3.3",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.66.0",
+    "next": "^15.0.0",
+    "papaparse": "^5.4.1",
+    "pdfjs-dist": "^4.10.38",
+    "postcss": "^8.5.32",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "server-only": "^0.0.1",
+    "tailwindcss": "^4.3.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/papaparse": "^5.3.15",
+    "@types/pdfkit": "^0.13.5",
+    "@types/react": "^19.0.0",
+    "pdfkit": "^0.15.0",
+    "prisma": "^6.0.0",
+    "puppeteer-core": "^25.16.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

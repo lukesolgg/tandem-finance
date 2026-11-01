@@ -1,0 +1,6 @@
+Transaction ID,Date,Time,Type,Name,Emoji,Category,Amount,Currency,Local amount,Local currency,Notes and #tags,Address,Receipt,Description,Category split,Money Out,Money In
+tx_0000AaA1,02/10/2026,08:14:02,Card payment,Pret A Manger,☕,Eating out,-4.35,GBP,-4.35,GBP,,,,PRET A MANGER LONDON GBR,,-4.35,
+tx_0000AaA2,02/10/2026,12:30:44,Card payment,Tesco,🛒,Groceries,-23.18,GBP,-23.18,GBP,,,,TESCO STORES 3021 BELFAST GBR,,-23.18,
+tx_0000AaA3,13/10/2026,09:00:00,Faster payment,ACME LTD,,Income,2150.00,GBP,2150.00,GBP,SALARY OCT,,,ACME LTD SALARY,,,2150.00
+tx_0000AaA4,15/10/2026,06:01:12,Direct Debit,Netflix,,Entertainment,-10.99,GBP,-10.99,GBP,,,,NETFLIX.COM,,-10.99,
+tx_0000AaA5,15/10/2026,06:02:12,Card payment,Uber,,Transport,"-1,012.40",GBP,"-1,012.40",GBP,,,,UBER *TRIP,,"-1,012.40",

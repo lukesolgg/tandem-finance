@@ -1,0 +1,18 @@
+From: 01/10/2026 to 31/10/2026        
+
+Account: XXXX XXXX XXXX 4321        
+
+Date: 02/10/2026    
+Description: CARD PAYMENT TO TESCO STORES 3021,23.18 GBP, RATE 1.00/GBP ON 30-09-2026    
+Amount: -23.18     
+Balance: 976.82     
+
+Date: 03/10/2026    
+Description: DIRECT DEBIT PAYMENT TO EE LIMITED REF 123456, MANDATE NO 0012    
+Amount: -25.00     
+Balance: 951.82     
+
+Date: 04/10/2026    
+Description: FASTER PAYMENTS RECEIPT REF.SALARY FROM ACME LTD    
+Amount: 1500.00     
+Balance: 2451.82     

@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Calm palette: warm-neutral surfaces, one indigo accent, money colours used sparingly. */
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --surface-2: #f1f1ee;
+  --border: #e6e5e1;
+  --text: #1b1b1f;
+  --muted: #6c6c75;
+  --accent: #5b5bd6;
+  --accent-soft: #ececfb;
+  --pos: #12855b;
+  --neg: #c93c3c;
+  --warn: #b7791f;
+  --ring: rgba(91, 91, 214, 0.35);
+}
+.dark {
+  --bg: #111113;
+  --surface: #18181b;
+  --surface-2: #202024;
+  --border: #2a2a2f;
+  --text: #ededef;
+  --muted: #9a9aa3;
+  --accent: #8b8bf0;
+  --accent-soft: #24243f;
+  --pos: #3fc78d;
+  --neg: #f07171;
+  --warn: #e0a84a;
+  --ring: rgba(139, 139, 240, 0.4);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-pos: var(--pos);
+  --color-neg: var(--neg);
+  --color-warn: var(--warn);
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+}
+
+html { -webkit-tap-highlight-color: transparent; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+.tabular { font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 6px; }
+dialog::backdrop { background: rgb(0 0 0 / 0.4); backdrop-filter: blur(2px); }
+/* iOS safe areas for the bottom tab bar */
+.pb-safe { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
+@media print {
+  .no-print { display: none !important; }
+  body { background: white; }
+}
